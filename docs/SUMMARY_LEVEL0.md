@@ -9,7 +9,13 @@
 
 ---
 
-## 0.1. Умные указатели (Smart Pointers)
+## 0.1. Управление памятью (Memory Management)
+
+### 0.1.1. xrMemory — кастомный аллокатор памяти
+
+---
+
+### 0.1.2. Умные указатели (Smart Pointers)
 
 ### Что такое умные указатели
 
@@ -379,6 +385,403 @@ intrusive_ptr<MyResource> copy = resource;  // Счётчик: 2
 
 ---
 
+### 0.1.3. Reference counting (ref_sound, ref_light)
+
+**Что это:**
+В движке OpenXRay используется собственная система reference counting для ресурсов (звуки, источники света, шейдеры и т.д.). Это похоже на `intrusive_ptr`, но с более специализированной реализацией, оптимизированной для игрового движка.
+
+**Архитектура:**
+
+Система состоит из трёх компонентов:
+
+1. **`xr_resource`** — базовый класс для всех ресурсов с встроенным счётчиком ссылок
+2. **`resptr_base<T>`** — базовая обёртка, управляющая счётчиком ссылок
+3. **`resptr_core<T, C>`** — финальная обёртка с удобным API
+
+**Базовый класс ресурса:**
+
+```cpp
+// src/xrCore/xr_resource.h
+struct xr_resource
+{
+    std::atomic<u32> ref_count{ 0 };  // Атомарный счётчик ссылок
+};
+```
+
+**Ключевые особенности:**
+- Счётчик ссылок хранится **внутри самого объекта** (как у `intrusive_ptr`)
+- Счётчик **атомарный** (`std::atomic<u32>`) — безопасен для многопоточности
+- Начальное значение: `0` (не `1`, как у `intrusive_ptr`)
+
+**Как работает `resptr_base`:**
+
+```cpp
+template <class T>
+class resptr_base
+{
+protected:
+    T* p_;  // Указатель на ресурс
+    
+    void _inc()  // Увеличить счётчик
+    {
+        if (p_)
+            ++p_->ref_count;  // Атомарная операция
+    }
+    
+    void _dec()  // Уменьшить счётчик
+    {
+        if (p_)
+        {
+            --p_->ref_count;  // Атомарная операция
+            if (0 == p_->ref_count)
+                xr_delete(p_);  // Удалить, если счётчик = 0
+        }
+    }
+    
+    void _set(T* rhs)  // Установить новый указатель
+    {
+        if (rhs)
+            ++rhs->ref_count;  // Увеличить счётчик нового объекта
+        _dec();                // Уменьшить счётчик старого объекта
+        p_ = rhs;
+    }
+};
+```
+
+**Как работает `resptr_core`:**
+
+```cpp
+template <class T, typename C>
+class resptr_core : public C
+{
+public:
+    // Конструктор из указателя
+    resptr_core(T* p, bool add_ref = true)
+    {
+        C::p_ = p;
+        if (add_ref)
+            C::_inc();  // Увеличить счётчик при создании
+    }
+    
+    // Конструктор копирования
+    resptr_core(const self& rhs)
+    {
+        C::p_ = rhs.p_;
+        C::_inc();  // Увеличить счётчик при копировании
+    }
+    
+    // Деструктор
+    ~resptr_core()
+    {
+        C::_dec();  // Уменьшить счётчик при уничтожении
+    }
+    
+    // Оператор присваивания
+    self& operator=(const self& rhs)
+    {
+        this->_set(rhs);  // Правильно обработать старый и новый объекты
+        return *this;
+    }
+    
+    // Операторы доступа
+    T& operator*() const { return *C::p_; }
+    T* operator->() const { return C::p_; }
+};
+```
+
+**Пример 1: `ref_sound` (звуковой ресурс)**
+
+```cpp
+// Определение
+struct CSound : public xr_resource
+{
+    CSound_source* handle;
+    // ... другие поля
+};
+
+using ref_sound = resptr_core<CSound, resptrcode_sound>;
+
+// Использование
+ref_sound sound1;
+sound1.create("weapon_shot.ogg", st_Effect, 0);
+// После create(): CSound создан, ref_count = 1
+
+ref_sound sound2 = sound1;  // Копирование
+// Теперь: ref_count = 2 (оба указателя указывают на один объект)
+
+sound1.destroy();  // Устанавливает sound1.p_ = nullptr
+// ref_count уменьшается до 1 (остаётся только sound2)
+
+// Когда sound2 выходит из области видимости:
+// ~ref_sound() → _dec() → ref_count = 0 → xr_delete(CSound)
+```
+
+**Пример 2: `ref_light` (источник света)**
+
+```cpp
+// Определение
+class IRender_Light : public xr_resource
+{
+    // ... виртуальные методы
+};
+
+using ref_light = resptr_core<IRender_Light, resptrcode_light>;
+
+// Использование
+ref_light torch_light = GEnv.Render->light_create();
+// После создания: IRender_Light создан, ref_count = 1
+
+torch_light->set_active(true);
+torch_light->set_position(player_pos);
+torch_light->set_range(10.0f);
+
+// Если несколько объектов используют один источник света:
+ref_light shared_light = torch_light;  // ref_count = 2
+
+// Когда torch_light выходит из области видимости:
+// ref_count = 1 (объект всё ещё жив, т.к. shared_light его держит)
+
+// Когда shared_light выходит из области видимости:
+// ref_count = 0 → xr_delete(IRender_Light)
+```
+
+**Пошаговый разбор жизненного цикла:**
+
+**Шаг 1: Создание ресурса**
+```cpp
+ref_sound sound;
+sound.create("explosion.ogg", st_Effect, 0);
+```
+
+Что происходит внутри:
+1. `GEnv.Sound->create()` создаёт объект `CSound*` через `xr_new`
+2. `_set(CSound*)` вызывается:
+   - `++CSound->ref_count` → `ref_count = 1`
+   - `p_ = CSound*`
+3. Результат: `sound.p_` указывает на `CSound`, `ref_count = 1`
+
+**Шаг 2: Копирование указателя**
+```cpp
+ref_sound sound_copy = sound;
+```
+
+Что происходит:
+1. Вызывается конструктор копирования `resptr_core(const self& rhs)`
+2. `p_ = rhs.p_` → оба указателя указывают на один `CSound`
+3. `_inc()` → `++CSound->ref_count` → `ref_count = 2`
+4. Результат: два `ref_sound` указывают на один `CSound`, `ref_count = 2`
+
+**Шаг 3: Изменение указателя**
+```cpp
+sound.destroy();  // Внутри: _set(nullptr)
+```
+
+Что происходит:
+1. `_set(nullptr)` вызывается:
+   - `rhs = nullptr`, поэтому `++rhs->ref_count` не выполняется
+   - `_dec()` вызывается для старого объекта:
+     - `--CSound->ref_count` → `ref_count = 1`
+     - `ref_count != 0`, поэтому объект НЕ удаляется
+   - `p_ = nullptr`
+2. Результат: `sound.p_ = nullptr`, `sound_copy` всё ещё держит объект, `ref_count = 1`
+
+**Шаг 4: Уничтожение последнего указателя**
+```cpp
+// sound_copy выходит из области видимости
+```
+
+Что происходит:
+1. Вызывается деструктор `~resptr_core()`
+2. `_dec()` вызывается:
+   - `--CSound->ref_count` → `ref_count = 0`
+   - `ref_count == 0`, поэтому вызывается `xr_delete(CSound)`
+   - `xr_delete` вызывает деструктор `CSound` и освобождает память через `xrMemory`
+3. Результат: объект `CSound` удалён, память освобождена
+
+**Визуализация счётчика ссылок:**
+
+```
+Создание:
+ref_sound sound1;
+sound1.create("shot.ogg", ...);
+┌─────────────┐
+│   CSound    │
+│ ref_count=1 │ ← sound1.p_
+└─────────────┘
+
+Копирование:
+ref_sound sound2 = sound1;
+┌─────────────┐
+│   CSound    │
+│ ref_count=2 │ ← sound1.p_ и sound2.p_
+└─────────────┘
+
+Уничтожение sound1:
+sound1.destroy();
+┌─────────────┐
+│   CSound    │
+│ ref_count=1 │ ← только sound2.p_
+└─────────────┘
+sound1.p_ = nullptr
+
+Уничтожение sound2:
+~sound2()
+┌─────────────┐
+│   CSound    │
+│ ref_count=0 │ → xr_delete() → объект удалён
+└─────────────┘
+```
+
+**Почему атомарный счётчик?**
+
+В многопоточной среде несколько потоков могут одновременно:
+- Создавать `ref_sound` из одного ресурса
+- Уничтожать `ref_sound`
+- Копировать `ref_sound`
+
+Без атомарности возможна **race condition**:
+```cpp
+// Поток 1:                    Поток 2:
+ref_count = 5                 ref_count = 5
+ref_count++  // читает 5      ref_count++  // читает 5
+ref_count = 6                 ref_count = 6  // ОШИБКА! Должно быть 7
+```
+
+С атомарностью операции безопасны:
+```cpp
+// Поток 1:                    Поток 2:
+ref_count = 5                 ref_count = 5
+++ref_count  // атомарно      ++ref_count  // атомарно
+ref_count = 6                 ref_count = 7  // Правильно!
+```
+
+**Отличия от `intrusive_ptr`:**
+
+| Характеристика | `intrusive_ptr` | `resptr_core` (ref_sound/ref_light) |
+|----------------|-----------------|-------------------------------------|
+| Базовый класс | `intrusive_base` | `xr_resource` |
+| Тип счётчика | `size_t` (обычный) | `std::atomic<u32>` (атомарный) |
+| Начальное значение | `0` | `0` |
+| Увеличение при создании | `acquire()` → `++m_ref_count` | `_inc()` → `++ref_count` |
+| Удаление | `release(object)` → `xr_delete` | `_dec()` → `xr_delete` |
+| Многопоточность | Небезопасно | Безопасно (atomic) |
+
+**Практические примеры из кода движка:**
+
+**Пример 1: Факел с источником света**
+```cpp
+// src/xrGame/Torch.h
+class CTorch
+{
+    ref_light light_render;  // Источник света факела
+    ref_light light_omni;    // Омни-источник для освещения вокруг
+};
+
+// При создании факела:
+CTorch::CTorch()
+{
+    light_render = GEnv.Render->light_create();
+    // ref_count = 1 для light_render
+    
+    light_omni = GEnv.Render->light_create();
+    // ref_count = 1 для light_omni
+}
+
+// Если факел копируется (например, в инвентаре):
+CTorch copy = original;
+// light_render копируется → ref_count = 2
+// light_omni копируется → ref_count = 2
+
+// Когда оригинальный факел уничтожается:
+// ~CTorch() → ~ref_light() → ref_count = 1 (копия всё ещё держит)
+```
+
+**Пример 2: Звук выстрела**
+```cpp
+// src/xrGame/sound_player.cpp
+void CSoundPlayer::play(ESoundTypes type, const char* name)
+{
+    ref_sound sound;
+    sound.create(name, st_Effect, type);
+    // ref_count = 1
+    
+    sound.play(player_object);
+    // Звук начинает играть, но sound всё ещё держит ресурс
+    
+    // Когда функция заканчивается:
+    // ~ref_sound() → ref_count = 0 → xr_delete(CSound)
+    // НО! Если звук всё ещё играет, он может быть сохранён внутри звуковой системы
+}
+```
+
+**Пример 3: Массив источников света**
+```cpp
+// src/Layers/xrRender/Light_DB.h
+class CLight_DB
+{
+    xr_vector<ref_light> v_static;  // Статические источники света
+    xr_vector<ref_light> v_hemi;    // Полусферические источники
+    ref_light sun;                   // Солнце
+};
+
+// При загрузке уровня:
+void CLight_DB::Load(IReader* fs)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        ref_light light = Create();  // ref_count = 1
+        v_static.push_back(light);   // Копирование → ref_count = 2
+        // light выходит из области видимости → ref_count = 1
+        // Объект жив, т.к. v_static[i] его держит
+    }
+}
+
+// При выгрузке уровня:
+void CLight_DB::Unload()
+{
+    v_static.clear();  // Все ref_light уничтожаются → ref_count = 0 → объекты удаляются
+}
+```
+
+**Важные моменты:**
+
+1. **Счётчик начинается с 0, а не с 1**
+   - При создании `resptr_core(T* p, bool add_ref = true)` счётчик увеличивается
+   - Если `add_ref = false`, счётчик остаётся 0 (редкий случай)
+
+2. **Автоматическое удаление при ref_count = 0**
+   - Не нужно вручную вызывать `delete`
+   - Удаление происходит через `xr_delete` → `xrMemory`
+
+3. **Безопасность при присваивании**
+   - `_set()` сначала увеличивает счётчик нового объекта, потом уменьшает старого
+   - Это предотвращает удаление объекта, если `new_ptr == old_ptr`
+
+4. **Многопоточная безопасность**
+   - `std::atomic<u32>` гарантирует корректную работу в многопоточном коде
+   - Операции `++` и `--` атомарны
+
+**Когда использовать `resptr_core` вместо других умных указателей:**
+
+✅ **Используй `resptr_core` (ref_sound, ref_light и т.д.) когда:**
+- Работаешь с ресурсами движка (звуки, источники света, шейдеры)
+- Нужна многопоточная безопасность
+- Объект уже наследуется от `xr_resource`
+- Нужна интеграция с системой ресурсов движка
+
+❌ **НЕ используй `resptr_core` когда:**
+- Создаёшь свои классы, не наследуемые от `xr_resource`
+- Нужен `unique_ptr` (единоличное владение)
+- Нужен `shared_ptr` (для совместимости с STL)
+
+**Итог:**
+
+`ref_sound`, `ref_light` и другие `resptr_*` типы — это специализированные умные указатели движка OpenXRay для управления ресурсами с автоматическим подсчётом ссылок. Они похожи на `intrusive_ptr`, но оптимизированы для игрового движка: используют атомарный счётчик для многопоточности и интегрированы с системой управления памятью `xrMemory`.
+
+**Ключевая идея:** Ресурс (звук, свет) живёт, пока на него есть хотя бы одна ссылка (`ref_sound`/`ref_light`). Когда последняя ссылка уничтожается, ресурс автоматически удаляется.
+
+---
+
 ### Сравнение типов умных указателей в движке
 
 | Тип | Счётчик ссылок | Аллокации | Overhead | Когда использовать |
@@ -408,9 +811,17 @@ intrusive_ptr<MyResource> copy = resource;  // Счётчик: 2
 
 ## 0.2. Контейнеры данных (Data Structures)
 
+### 0.2.1. xr_vector, xr_list, xr_map
+
 ---
 
-## 0.3. Базовые типы и утилиты: векторы, матрицы, прямоугольники
+### 0.2.2. shared_str — строки с подсчётом ссылок
+
+---
+
+## 0.3. Базовые типы и утилиты
+
+### 0.3.1. Математические типы (Fvector, Fmatrix, Frect)
 
 ---
 
