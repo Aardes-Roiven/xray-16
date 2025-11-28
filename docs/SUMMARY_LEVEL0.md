@@ -188,6 +188,224 @@ C API не понимает умные указатели. Используй `T
 
 ---
 
+### Умные указатели в OpenXRay: xr-версии
+
+В движке OpenXRay используются собственные версии умных указателей, которые интегрированы с системой управления памятью `xrMemory`. Это позволяет всем аллокациям проходить через движковый аллокатор для логирования, профилирования и оптимизации.
+
+**Где в коде:**
+- `src/xrCommon/xr_smart_pointers.h` — `xr_unique_ptr`, `xr_shared_ptr`
+- `src/xrCore/intrusive_ptr.h` — `intrusive_ptr`
+
+#### 1. `xr_unique_ptr<T>` — единоличное владение через xrMemory
+
+**Что это:**
+```cpp
+template <typename T>
+using xr_unique_ptr = std::unique_ptr<T, xr_custom_deleter<T>>;
+```
+
+**Особенности:**
+- Это `std::unique_ptr` с кастомным deleter `xr_custom_deleter`
+- При удалении объекта используется `xr_delete` вместо обычного `delete`
+- Все аллокации проходят через `xrMemory` (логирование, профилирование)
+- Поведение идентично `std::unique_ptr`, но интегрировано с движком
+
+**Кастомный deleter:**
+```cpp
+template <typename T>
+struct xr_custom_deleter
+{
+    void operator()(T* ptr) const noexcept
+    {
+        xr_delete(ptr);  // Использует движковый аллокатор
+    }
+};
+```
+
+**Создание:**
+```cpp
+// Используй xr_make_unique вместо std::make_unique
+auto obj = xr_make_unique<MyClass>(arg1, arg2);
+// Внутри: xr_new<T>(...) → Memory.mem_alloc() → placement new
+```
+
+**Пример из кода движка:**
+```cpp
+// src/xrGame/ai_space.cpp
+m_ef_storage = xr_make_unique<CEF_Storage>();
+// Объект создаётся через xrMemory и автоматически удалится через xr_delete
+```
+
+**Когда использовать:**
+- Владение объектом у одного владельца
+- Нужна интеграция с системой логирования/профилирования движка
+- Все объекты должны проходить через `xrMemory`
+
+---
+
+#### 2. `xr_shared_ptr<T>` — совместное владение через xrMemory
+
+**Что это:**
+```cpp
+template <typename T>
+using xr_shared_ptr = std::shared_ptr<T>;
+```
+
+**Особенности:**
+- Это обычный `std::shared_ptr`, но с кастомным deleter при создании через `xr_make_shared`
+- При создании через `xr_make_shared` используется `xr_new` и `xr_custom_deleter`
+- Поведение идентично `std::shared_ptr` (счётчик ссылок, atomic операции)
+
+**Создание:**
+```cpp
+// Используй xr_make_shared вместо std::make_shared
+auto shared = xr_make_shared<MyClass>(arg1, arg2);
+// Внутри: xr_new<T>(...) → Memory.mem_alloc() → placement new
+//         + xr_custom_deleter для удаления
+```
+
+**Реализация:**
+```cpp
+template <class T, class... Args>
+inline xr_shared_ptr<T> xr_make_shared(Args&&... args)
+{
+    return xr_shared_ptr<T>(xr_new<T>(std::forward<Args>(args)...), 
+                           xr_custom_deleter<T>());
+}
+```
+
+**Когда использовать:**
+- Несколько объектов должны владеть одним ресурсом
+- Нужна интеграция с `xrMemory`
+- Разделение ресурсов между компонентами движка
+
+**Важно:** Если создаёшь `xr_shared_ptr` вручную (не через `xr_make_shared`), убедись, что используешь `xr_custom_deleter`, иначе объект не будет удаляться через `xrMemory`.
+
+---
+
+#### 3. `intrusive_ptr<T>` — встроенный подсчёт ссылок
+
+**Что это:**
+Кастомная реализация умного указателя, где счётчик ссылок хранится **внутри самого объекта**, а не в отдельном control block (как у `shared_ptr`).
+
+**Архитектура:**
+```cpp
+// Базовый класс для объектов с intrusive_ptr
+struct intrusive_base
+{
+    size_t m_ref_count;  // Счётчик ссылок внутри объекта
+    
+    void acquire() { ++m_ref_count; }
+    bool release() { return --m_ref_count == 0; }
+    
+    template <typename T>
+    void release(T* object) {
+        xr_delete(object);  // Удаление через xrMemory
+    }
+};
+```
+
+**Требования к объекту:**
+- Объект должен наследоваться от `intrusive_base` (или другого базового класса с методами `acquire()`/`release()`)
+- Счётчик ссылок хранится в самом объекте, а не в отдельной структуре
+
+**Как работает:**
+```cpp
+// При создании intrusive_ptr
+intrusive_ptr<MyClass> ptr(new MyClass());
+// → вызывает object->acquire() → ++m_ref_count
+
+// При копировании
+intrusive_ptr<MyClass> ptr2 = ptr;
+// → вызывает object->acquire() → ++m_ref_count (теперь 2)
+
+// При уничтожении
+// → вызывает object->release() → --m_ref_count
+// → если m_ref_count == 0, вызывает object->release(object) → xr_delete
+```
+
+**Реализация:**
+```cpp
+template <typename ObjectType, typename BaseType = intrusive_base>
+class intrusive_ptr
+{
+    object_type* m_object;
+    
+    void dec() {
+        if (m_object && m_object->release()) {
+            m_object->release(m_object);  // Удаление через xrMemory
+        }
+    }
+    
+public:
+    intrusive_ptr(object_type* rhs) : m_object(rhs) {
+        if (m_object) m_object->acquire();
+    }
+    
+    ~intrusive_ptr() { dec(); }
+    // ... остальные методы
+};
+```
+
+**Преимущества перед `shared_ptr`:**
+- **Меньше аллокаций**: нет отдельного control block
+- **Меньше overhead**: счётчик в объекте, нет дополнительной косвенности
+- **Предсказуемый layout**: размер объекта известен заранее
+- **Экономия памяти**: особенно важно для объектов, которые часто копируются
+
+**Недостатки:**
+- Объект должен быть спроектирован для работы с `intrusive_ptr` (наследование от `intrusive_base`)
+- Нельзя использовать с любым типом (как `shared_ptr`)
+
+**Когда использовать:**
+- Объекты, которые часто копируются и нужен подсчёт ссылок
+- Критична экономия памяти (нет control block)
+- Нужен жёсткий контроль над layout объекта
+- Объекты уже имеют встроенный счётчик ссылок
+
+**Пример использования:**
+```cpp
+// Класс должен наследоваться от intrusive_base
+class MyResource : public intrusive_base
+{
+    // ... данные ресурса
+};
+
+// Использование
+intrusive_ptr<MyResource> resource(new MyResource());
+intrusive_ptr<MyResource> copy = resource;  // Счётчик: 2
+// При уничтожении всех указателей объект удалится через xr_delete
+```
+
+---
+
+### Сравнение типов умных указателей в движке
+
+| Тип | Счётчик ссылок | Аллокации | Overhead | Когда использовать |
+|-----|----------------|-----------|----------|-------------------|
+| `xr_unique_ptr` | Нет (один владелец) | Одна (объект) | Нет | Единоличное владение |
+| `xr_shared_ptr` | В control block | Две (объект + control block) | Да (atomic) | Несколько владельцев |
+| `intrusive_ptr` | В объекте | Одна (объект) | Минимальный | Частое копирование, экономия памяти |
+
+### Правила выбора в OpenXRay
+
+1. **По умолчанию**: используй `xr_unique_ptr` для единоличного владения
+2. **Несколько владельцев**: используй `xr_shared_ptr` или `intrusive_ptr`
+3. **Экономия памяти критична**: выбирай `intrusive_ptr` (если объект поддерживает)
+4. **Любой тип**: используй `xr_shared_ptr` (не требует изменений в классе)
+5. **Всегда используй `xr_make_unique`/`xr_make_shared`**: для интеграции с `xrMemory`
+
+### Интеграция с xrMemory
+
+Все три типа умных указателей в движке интегрированы с `xrMemory`:
+- **Создание**: через `xr_new` → `Memory.mem_alloc()`
+- **Удаление**: через `xr_delete` → `Memory.mem_free()`
+- **Профит**: логирование, профилирование, оптимизация аллокаций
+
+**Важно:** Всегда используй `xr_make_unique`/`xr_make_shared` вместо `std::make_unique`/`std::make_shared`, чтобы все аллокации проходили через движковый аллокатор.
+
+---
+
 ## 0.2. Контейнеры данных (Data Structures)
 
 ---
