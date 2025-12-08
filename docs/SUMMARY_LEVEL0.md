@@ -1349,6 +1349,790 @@ const money = financeManager.withdraw(1000);
 
 ### 0.3.1. Математические типы (Fvector, Fmatrix, Frect)
 
+**Что это такое и зачем нужно:**
+
+В игровом движке постоянно работают с 3D-координатами, направлениями, трансформациями объектов. Для этого используются специализированные математические типы: `Fvector` (3D-вектор), `Fmatrix` (матрица трансформации 4×4) и `Frect` (2D-прямоугольник). Это базовые строительные блоки для всех математических операций в движке.
+
+**Аналогия из JavaScript:**
+
+Представь, что в React ты работаешь с координатами элементов на странице:
+```javascript
+// В JavaScript ты бы использовал объекты:
+const position = { x: 100, y: 200, z: 50 };
+const transform = { scaleX: 1.5, scaleY: 1.5, rotation: 45 };
+const rect = { left: 10, top: 20, right: 100, bottom: 200 };
+```
+
+В OpenXRay то же самое, но с оптимизированными типами и методами:
+```cpp
+Fvector position;
+position.set(100, 200, 50);
+
+Fmatrix transform;
+transform.scale(1.5f, 1.5f, 1.5f);
+
+Frect rect;
+rect.set(10, 20, 100, 200);
+```
+
+---
+
+#### 1. Fvector — 3D-вектор
+
+**Что это:**
+
+`Fvector` — это структура для работы с трёхмерными векторами. Используется для представления позиций, направлений, скоростей, нормалей и любых других 3D-величин.
+
+**Определение:**
+
+```cpp
+// src/xrCore/_vector3d.h
+template <class T>
+struct _vector3
+{
+    T x, y, z;  // Три компоненты вектора
+    
+    // Методы для работы с вектором
+    SelfRef set(T _x, T _y, T _z);
+    SelfRef add(const Self& v);
+    SelfRef sub(const Self& v);
+    SelfRef mul(T s);  // Умножение на скаляр
+    SelfRef normalize();
+    T magnitude() const;
+    T dotproduct(const Self& v) const;
+    // ... и много других методов
+};
+
+using Fvector = _vector3<float>;  // Fvector — это вектор из float
+```
+
+**Структура данных:**
+
+```cpp
+Fvector pos;
+// В памяти это просто три float подряд:
+// [x: float][y: float][z: float]
+// Размер: 12 байт (3 × 4 байта)
+```
+
+**Основные операции:**
+
+**1. Создание и установка значений:**
+
+```cpp
+Fvector pos;
+
+// Установить значения
+pos.set(10.0f, 20.0f, 30.0f);
+
+// Или напрямую через поля
+pos.x = 10.0f;
+pos.y = 20.0f;
+pos.z = 30.0f;
+
+// Или через конструктор (если есть)
+Fvector pos2(5.0f, 15.0f, 25.0f);
+```
+
+**2. Арифметические операции:**
+
+```cpp
+Fvector a, b, result;
+
+a.set(1.0f, 2.0f, 3.0f);
+b.set(4.0f, 5.0f, 6.0f);
+
+// Сложение: result = a + b
+result.add(a, b);  // result = (5, 7, 9)
+
+// Или модифицирующее сложение: a += b
+a.add(b);  // a теперь (5, 7, 9)
+
+// Вычитание
+result.sub(a, b);  // result = a - b
+
+// Умножение на скаляр
+result.mul(a, 2.0f);  // result = a * 2 = (2, 4, 6)
+
+// Деление на скаляр
+result.div(a, 2.0f);  // result = a / 2 = (0.5, 1, 1.5)
+```
+
+**3. Нормализация (приведение к единичной длине):**
+
+```cpp
+Fvector direction;
+direction.set(3.0f, 4.0f, 0.0f);  // Длина = 5
+
+// Нормализовать вектор (длина станет 1.0)
+direction.normalize();  // direction = (0.6, 0.8, 0.0)
+
+// Безопасная нормализация (проверяет, что длина > 0)
+direction.normalize_safe();
+
+// Получить длину вектора
+float length = direction.magnitude();  // 1.0 после нормализации
+
+// Квадрат длины (быстрее, т.к. не вычисляется квадратный корень)
+float lengthSqr = direction.square_magnitude();  // 1.0
+```
+
+**4. Скалярное и векторное произведение:**
+
+```cpp
+Fvector a, b;
+a.set(1.0f, 0.0f, 0.0f);  // Направление вправо
+b.set(0.0f, 1.0f, 0.0f);  // Направление вверх
+
+// Скалярное произведение (dot product)
+float dot = a.dotproduct(b);  // 0.0 (векторы перпендикулярны)
+
+// Векторное произведение (cross product)
+Fvector cross;
+cross.crossproduct(a, b);  // cross = (0, 0, 1) - направление "вперёд"
+```
+
+**5. Расстояние между точками:**
+
+```cpp
+Fvector playerPos, enemyPos;
+playerPos.set(0.0f, 0.0f, 0.0f);
+enemyPos.set(3.0f, 4.0f, 0.0f);
+
+// Расстояние между точками
+float distance = playerPos.distance_to(enemyPos);  // 5.0
+
+// Квадрат расстояния (быстрее, без sqrt)
+float distanceSqr = playerPos.distance_to_sqr(enemyPos);  // 25.0
+
+// Расстояние только по XZ плоскости (игнорируя Y)
+float distanceXZ = playerPos.distance_to_xz(enemyPos);  // 5.0
+```
+
+**6. Интерполяция (плавное движение):**
+
+```cpp
+Fvector start, end, current;
+start.set(0.0f, 0.0f, 0.0f);
+end.set(100.0f, 0.0f, 0.0f);
+
+// Линейная интерполяция (t от 0.0 до 1.0)
+float t = 0.5f;  // 50% пути
+current.lerp(start, end, t);  // current = (50, 0, 0)
+
+// Инерция (плавное приближение)
+current.inertion(end, 0.1f);  // Плавно приближается к end
+```
+
+**7. Установка длины вектора:**
+
+```cpp
+Fvector direction;
+direction.set(1.0f, 1.0f, 0.0f);
+direction.normalize();  // Длина = 1.0
+
+// Установить конкретную длину
+direction.set_length(5.0f);  // Теперь длина = 5.0, направление то же
+```
+
+**8. Углы (Heading/Pitch):**
+
+```cpp
+Fvector direction;
+
+// Установить направление через углы (Heading - горизонтальный, Pitch - вертикальный)
+direction.setHP(45.0f, 30.0f);  // 45° вправо, 30° вверх
+
+// Получить углы из направления
+float heading, pitch;
+direction.getHP(heading, pitch);
+
+// Или отдельно
+float h = direction.getH();  // Heading
+float p = direction.getP();  // Pitch
+```
+
+**Примеры из реального кода движка:**
+
+```cpp
+// src/xrGame/Actor.cpp - позиция игрока
+Fvector actor_position;
+actor_position.set(0.0f, 0.0f, 0.0f);
+
+// src/xrGame/Weapon.cpp - направление выстрела
+Fvector fire_dir;
+fire_dir.setHP(weapon->GetFireDirection().getH(), 
+               weapon->GetFireDirection().getP());
+fire_dir.normalize();
+
+// src/xrEngine/CameraBase.cpp - позиция камеры
+Fvector cam_pos;
+cam_pos.mad(eye_position, look_direction, distance);
+```
+
+**Когда использовать:**
+
+✅ **Используй `Fvector`, когда:**
+- Работаешь с 3D-координатами (позиции объектов)
+- Нужны направления (направление взгляда, движения)
+- Вычисляешь расстояния между точками
+- Работаешь с нормалями (направления поверхностей)
+- Выполняешь физические расчёты (скорости, ускорения)
+
+❌ **НЕ используй `Fvector`, когда:**
+- Работаешь с 2D-координатами (используй `Fvector2`)
+- Нужны цвета (используй `Fcolor`)
+- Работаешь с UI координатами (используй `Frect`)
+
+---
+
+#### 2. Fmatrix — матрица трансформации 4×4
+
+**Что это:**
+
+`Fmatrix` — это матрица 4×4 для представления трансформаций в 3D-пространстве: перемещение (translation), вращение (rotation) и масштабирование (scaling). Используется для преобразования координат из локальной системы объекта в мировую систему координат.
+
+**Определение:**
+
+```cpp
+// src/xrCore/_matrix.h
+struct Fmatrix
+{
+    union
+    {
+        // Доступ через индексы
+        float m[4][4];
+        
+        // Доступ через именованные поля
+        struct {
+            float _11, _12, _13, _14;
+            float _21, _22, _23, _24;
+            float _31, _32, _33, _34;
+            float _41, _42, _43, _44;
+        };
+        
+        // Доступ через векторы (i, j, k - оси, c - позиция)
+        struct {
+            Fvector i;    // Правая ось (Right)
+            float _14_;
+            Fvector j;    // Верхняя ось (Up/Normal)
+            float _24_;
+            Fvector k;    // Направление вперёд (Direction)
+            float _34_;
+            Fvector c;    // Позиция (Center/Translation)
+            float _44_;
+        };
+    };
+    
+    // Методы для работы с матрицей
+    SelfRef identity();
+    SelfRef translate(const Fvector& Loc);
+    SelfRef rotateX(float Angle);
+    SelfRef mul(const Self& A, const Self& B);
+    // ... и много других методов
+};
+```
+
+**Структура матрицы:**
+
+```
+Матрица 4×4 в памяти:
+┌─────────────────────────────────┐
+│ _11  _12  _13  _14  │  i.x  i.y  i.z  0  │
+│ _21  _22  _23  _24  │  j.x  j.y  j.z  0  │
+│ _31  _32  _33  _34  │  k.x  k.y  k.z  0  │
+│ _41  _42  _43  _44  │  c.x  c.y  c.z  1  │
+└─────────────────────────────────┘
+     ↑                    ↑
+  Вращение +        Позиция
+  Масштаб           (Translation)
+```
+
+**Основные операции:**
+
+**1. Создание единичной матрицы (identity):**
+
+```cpp
+Fmatrix transform;
+transform.identity();  // Единичная матрица (нет трансформации)
+
+// Результат:
+// [1  0  0  0]
+// [0  1  0  0]
+// [0  0  1  0]
+// [0  0  0  1]
+```
+
+**2. Трансляция (перемещение):**
+
+```cpp
+Fmatrix transform;
+
+// Установить только трансляцию
+Fvector position;
+position.set(10.0f, 20.0f, 30.0f);
+transform.translate(position);  // Матрица перемещения
+
+// Или напрямую
+transform.translate(10.0f, 20.0f, 30.0f);
+
+// Добавить трансляцию к существующей матрице
+transform.translate_add(position);
+
+// Изменить только трансляцию (не трогая вращение)
+transform.translate_over(position);
+```
+
+**3. Вращение:**
+
+```cpp
+Fmatrix transform;
+
+// Вращение вокруг оси X
+transform.rotateX(45.0f);  // 45 градусов
+
+// Вращение вокруг оси Y
+transform.rotateY(90.0f);
+
+// Вращение вокруг оси Z
+transform.rotateZ(180.0f);
+
+// Вращение вокруг произвольной оси
+Fvector axis;
+axis.set(1.0f, 1.0f, 0.0f);
+axis.normalize();
+transform.rotation(axis, 45.0f);  // 45° вокруг axis
+
+// Вращение через кватернион
+Fquaternion q;
+// ... установка кватерниона ...
+transform.rotation(q);
+```
+
+**4. Масштабирование:**
+
+```cpp
+Fmatrix transform;
+
+// Масштабирование по осям
+transform.scale(2.0f, 2.0f, 2.0f);  // Увеличить в 2 раза
+
+// Или через вектор
+Fvector scale;
+scale.set(1.5f, 1.5f, 1.5f);
+transform.scale(scale);
+```
+
+**5. Умножение матриц (комбинирование трансформаций):**
+
+```cpp
+Fmatrix translation, rotation, result;
+
+// Создать матрицу перемещения
+translation.translate(10.0f, 0.0f, 0.0f);
+
+// Создать матрицу вращения
+rotation.rotateY(45.0f);
+
+// Умножить: result = rotation × translation
+// (сначала перемещение, потом вращение)
+result.mul(rotation, translation);
+
+// Или модифицирующее умножение
+Fmatrix transform;
+transform.identity();
+transform.mulA_44(rotation);    // transform = rotation × transform
+transform.mulA_44(translation); // transform = translation × transform
+```
+
+**6. Применение трансформации к точке:**
+
+```cpp
+Fmatrix transform;
+transform.translate(10.0f, 20.0f, 30.0f);
+
+Fvector point, transformed;
+point.set(1.0f, 2.0f, 3.0f);
+
+// Применить трансформацию: transformed = point × transform
+transform.transform_tiny(transformed, point);
+// transformed = (11, 22, 33) - точка смещена
+
+// Или с учётом проекции (для 4D координат)
+Fvector4 point4, transformed4;
+transform.transform(transformed4, point4);
+```
+
+**7. Инверсия матрицы (обратная трансформация):**
+
+```cpp
+Fmatrix transform, inverse;
+
+// Создать трансформацию
+transform.translate(10.0f, 20.0f, 30.0f);
+transform.rotateY(45.0f);
+
+// Вычислить обратную матрицу
+inverse.invert(transform);
+
+// Теперь inverse отменяет действие transform
+Fvector point, transformed, back;
+point.set(1.0f, 2.0f, 3.0f);
+
+transform.transform_tiny(transformed, point);
+inverse.transform_tiny(back, transformed);
+// back ≈ point (с небольшой погрешностью)
+```
+
+**8. Транспонирование:**
+
+```cpp
+Fmatrix transform, transposed;
+
+// Транспонировать матрицу
+transposed.transpose(transform);
+
+// Или модифицирующее транспонирование
+transform.transpose();
+```
+
+**Примеры из реального кода движка:**
+
+```cpp
+// src/xrEngine/CameraBase.cpp - матрица вида камеры
+Fmatrix view_matrix;
+view_matrix.identity();
+view_matrix.rotation(cam_dir, cam_up);
+view_matrix.translate_over(cam_pos);
+view_matrix.invert();  // Инвертируем для матрицы вида
+
+// src/xrGame/Weapon.cpp - позиция оружия на персонаже
+Fmatrix weapon_transform;
+weapon_transform.identity();
+weapon_transform.rotation(weapon_rotation);
+weapon_transform.translate_over(weapon_position);
+
+// Применить к модели оружия
+Fvector weapon_vertex, world_vertex;
+weapon_transform.transform_tiny(world_vertex, weapon_vertex);
+```
+
+**Когда использовать:**
+
+✅ **Используй `Fmatrix`, когда:**
+- Нужно преобразовать координаты из локальной системы в мировую
+- Работаешь с позицией и ориентацией объектов
+- Создаёшь матрицы вида и проекции для камеры
+- Комбинируешь несколько трансформаций (перемещение + вращение + масштаб)
+
+❌ **НЕ используй `Fmatrix`, когда:**
+- Нужны только простые операции с векторами (используй `Fvector`)
+- Работаешь с 2D-трансформациями (используй `Fmatrix33` или `Fvector2`)
+
+---
+
+#### 3. Frect — 2D-прямоугольник
+
+**Что это:**
+
+`Frect` — это структура для работы с 2D-прямоугольниками. Используется для UI-элементов, хитбоксов, областей экрана и любых прямоугольных областей в 2D-пространстве.
+
+**Определение:**
+
+```cpp
+// src/xrCore/_rect.h
+template <class T>
+struct _rect
+{
+    union
+    {
+        // Доступ через координаты углов
+        struct {
+            T x1, y1, x2, y2;  // Левый верхний и правый нижний углы
+        };
+        
+        // Доступ через границы
+        struct {
+            T left, top, right, bottom;
+        };
+        
+        // Доступ через векторы
+        struct {
+            _vector2<T> lt;  // Left-Top (левый верхний угол)
+            _vector2<T> rb;  // Right-Bottom (правый нижний угол)
+        };
+        
+        // Доступ как массив
+        T m[4];
+    };
+    
+    // Методы для работы с прямоугольником
+    SelfRef set(T _x1, T _y1, T _x2, T _y2);
+    bool in(T x, T y) const;  // Проверка, находится ли точка внутри
+    T width() const;
+    T height() const;
+    // ... и другие методы
+};
+
+using Frect = _rect<float>;  // Frect — прямоугольник из float
+using Irect = _rect<int>;    // Irect — прямоугольник из int
+```
+
+**Структура данных:**
+
+```cpp
+Frect rect;
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// В памяти:
+// [x1: float][y1: float][x2: float][y2: float]
+// Размер: 16 байт (4 × 4 байта)
+
+// Визуализация:
+// (x1, y1) = (10, 20) ──────────┐
+//                                │
+//                                │
+//                                │
+//                                └────────── (x2, y2) = (100, 200)
+```
+
+**Основные операции:**
+
+**1. Создание и установка значений:**
+
+```cpp
+Frect rect;
+
+// Установить через координаты углов
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// Или через границы
+rect.left = 10.0f;
+rect.top = 20.0f;
+rect.right = 100.0f;
+rect.bottom = 200.0f;
+
+// Или через векторы
+Fvector2 lt, rb;
+lt.set(10.0f, 20.0f);
+rb.set(100.0f, 200.0f);
+rect.set(lt, rb);
+
+// Обнулить
+rect.set_zero();  // (0, 0, 0, 0)
+
+// Сделать невалидным (пустым)
+rect.invalidate();  // Устанавливает максимальные/минимальные значения
+```
+
+**2. Проверка валидности:**
+
+```cpp
+Frect rect;
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// Проверить, валиден ли прямоугольник (x1 < x2 && y1 < y2)
+bool isValid = rect.valide();  // true
+
+// Проверить, пуст ли прямоугольник
+bool isEmpty = rect.is_empty();  // false
+
+// Сделать пустым
+rect.set_empty();  // Эквивалентно invalidate()
+```
+
+**3. Проверка попадания точки:**
+
+```cpp
+Frect rect;
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// Проверить, находится ли точка внутри прямоугольника
+bool inside1 = rect.in(50.0f, 50.0f);  // true
+bool inside2 = rect.in(5.0f, 5.0f);    // false (снаружи)
+
+// Или через вектор
+Fvector2 point;
+point.set(50.0f, 50.0f);
+bool inside3 = rect.in(point);  // true
+```
+
+**4. Получение размеров:**
+
+```cpp
+Frect rect;
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// Ширина
+float w = rect.width();   // 90.0 (x2 - x1)
+
+// Высота
+float h = rect.height();  // 180.0 (y2 - y1)
+
+// Центр прямоугольника
+Fvector2 center;
+rect.getcenter(center);  // center = (55, 110)
+
+// Размер прямоугольника
+Fvector2 size;
+rect.getsize(size);  // size = (90, 180)
+```
+
+**5. Смещение и масштабирование:**
+
+```cpp
+Frect rect;
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// Сместить прямоугольник
+rect.add(5.0f, 10.0f);  // (15, 30, 105, 210)
+
+// Или вычесть смещение
+rect.sub(5.0f, 10.0f);  // Вернёт обратно
+
+// Масштабировать
+rect.mul(2.0f, 2.0f);  // Увеличить в 2 раза: (20, 40, 200, 400)
+
+// Или разделить
+rect.div(2.0f, 2.0f);  // Уменьшить в 2 раза
+```
+
+**6. Изменение размера (shrink/grow):**
+
+```cpp
+Frect rect;
+rect.set(10.0f, 20.0f, 100.0f, 200.0f);
+
+// Уменьшить прямоугольник (сжать внутрь)
+rect.shrink(5.0f, 10.0f);  // (15, 30, 95, 190)
+
+// Увеличить прямоугольник (расширить наружу)
+rect.grow(5.0f, 10.0f);  // (5, 10, 105, 210)
+```
+
+**7. Пересечение прямоугольников:**
+
+```cpp
+Frect rect1, rect2, intersection;
+
+rect1.set(10.0f, 10.0f, 100.0f, 100.0f);
+rect2.set(50.0f, 50.0f, 150.0f, 150.0f);
+
+// Проверить, пересекаются ли прямоугольники
+bool intersects = rect1.intersected(rect2);  // true
+
+// Вычислить пересечение
+if (intersection.intersection(rect1, rect2)) {
+    // intersection теперь содержит область пересечения
+    // (50, 50, 100, 100)
+}
+```
+
+**Примеры из реального кода движка:**
+
+```cpp
+// src/xrUICore/UIWindow.cpp - размеры UI-элемента
+Frect window_rect;
+window_rect.set(0.0f, 0.0f, 800.0f, 600.0f);  // Размер окна
+
+// Проверка клика мыши
+Fvector2 mouse_pos;
+mouse_pos.set(mouse_x, mouse_y);
+if (window_rect.in(mouse_pos)) {
+    // Клик внутри окна
+}
+
+// src/xrEngine/Device.cpp - область рендеринга
+Frect viewport;
+viewport.set(0, 0, screen_width, screen_height);
+```
+
+**Когда использовать:**
+
+✅ **Используй `Frect`, когда:**
+- Работаешь с UI-элементами (размеры, позиции кнопок, окон)
+- Нужны хитбоксы в 2D (проверка кликов, пересечений)
+- Работаешь с областями экрана (viewport, зоны рендеринга)
+- Нужны прямоугольные области для коллизий в 2D
+
+❌ **НЕ используй `Frect`, когда:**
+- Работаешь с 3D-координатами (используй `Fvector` и `Fbox`)
+- Нужны сложные формы (используй специализированные типы)
+
+---
+
+#### Сравнительная таблица математических типов
+
+| Тип | Размер | Назначение | Когда использовать |
+|-----|--------|------------|-------------------|
+| `Fvector` | 12 байт | 3D-вектор (x, y, z) | Позиции, направления, нормали |
+| `Fmatrix` | 64 байта | Матрица 4×4 | Трансформации объектов, камеры |
+| `Frect` | 16 байт | 2D-прямоугольник | UI-элементы, хитбоксы, области экрана |
+
+---
+
+#### Практические рекомендации
+
+**1. Выбор типа:**
+
+- **Позиция объекта в 3D** → `Fvector`
+- **Трансформация объекта (позиция + вращение)** → `Fmatrix`
+- **Размеры UI-кнопки** → `Frect`
+- **Направление движения** → `Fvector` (нормализованный)
+- **Область видимости камеры** → `Frect` (для 2D) или `Fmatrix` (для 3D)
+
+**2. Производительность:**
+
+- `Fvector` — самый быстрый (12 байт, простые операции)
+- `Fmatrix` — самый медленный (64 байта, сложные вычисления)
+- `Frect` — средний (16 байт, простые проверки)
+
+**3. Частые ошибки:**
+
+❌ **Неправильно:**
+```cpp
+Fvector pos;
+pos = {10, 20, 30};  // Ошибка! Нужно использовать set()
+```
+
+✅ **Правильно:**
+```cpp
+Fvector pos;
+pos.set(10.0f, 20.0f, 30.0f);
+```
+
+❌ **Неправильно:**
+```cpp
+Fmatrix transform;
+transform = other;  // Копирование через оператор = может быть неэффективным
+```
+
+✅ **Правильно:**
+```cpp
+Fmatrix transform;
+transform.set(other);  // Явное копирование через метод
+```
+
+---
+
+#### Итог
+
+`Fvector`, `Fmatrix` и `Frect` — это фундаментальные математические типы движка OpenXRay. Они используются везде: от позиций объектов до UI-элементов. Понимание этих типов критично для работы с движком.
+
+**Ключевая идея:** Все три типа оптимизированы для игрового движка и предоставляют удобные методы для частых операций. Используй их вместо создания собственных структур — это обеспечит совместимость и производительность.
+
+---
+
+### 0.3.2. Дополнительные математические типы (Fvector2, Fvector4, Fquaternion, Fbox, Fsphere)
+
+### 0.3.3. Целочисленные типы (u8, u16, u32, s8, s16, s32)
+
+### 0.3.4. Математические функции и константы
+
+### 0.3.5. Утилиты для работы со строками (shared_str, xr_string)
+
+### 0.3.6. Другие утилиты (флаги, цвета, случайные числа)
+
 ---
 
 ## 0.4. Практический сценарий прохождения уровня 0
