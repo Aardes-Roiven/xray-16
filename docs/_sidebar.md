@@ -23,6 +23,8 @@
     - [0.3.6. Другие утилиты](SUMMARY_LEVEL0.md#036-другие-утилиты-флаги-цвета-случайные-числа)
   - [0.4. Практический сценарий](SUMMARY_LEVEL0.md#04-практический-сценарий-прохождения-уровня-0)
   - [0.5. Вопросы для самопроверки](SUMMARY_LEVEL0.md#05-вопросы-для-самопроверки)
+- [📖 Уровень 1: Архитектурные паттерны](SUMMARY_LEVEL1.md)
+  - [1.1. Observer Pattern (MessageRegistry)](SUMMARY_LEVEL1.md#11-observer-pattern-messageregistry)
 
 ---
 
