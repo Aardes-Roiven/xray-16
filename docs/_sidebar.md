@@ -38,7 +38,7 @@
 
 ## 📝 Дополнительные материалы
 
-- [✅ Чеклист: Игровой цикл](GAME_LOOP_ARCHITECTURE_CHECKLIST.md)
+- [✅ Чеклист: Игровой цикл](LEARNING_ROADMAP.md#-уровень-2-игровой-цикл-game-loop)
 - [🔤 shared_str — Подробный разбор](SHARED_STR_DETAILED.md)
 
 ---
